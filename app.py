@@ -393,3 +393,116 @@ table = cat[["제품카테고리","매출액","매출총이익","영업이익","
 st.dataframe(table, use_container_width=True)
 
 st.caption("Tip: 사이드바 필터로 사업부/지역/채널/세그먼트를 바꿔보며 비교하세요.")
+
+# =======================
+# PDF Export (한글 폰트 포함)
+# =======================
+import io
+import os
+from fpdf import FPDF
+import plotly.io as pio
+import streamlit as st
+
+# Plotly Figure -> PNG 바이트 (kaleido 필요)
+def fig_to_png_bytes(fig, scale=2.0, width=1400, height=800):
+    return pio.to_image(fig, format="png", scale=scale, width=width, height=height, engine="kaleido")
+
+def build_pdf_bytes(
+    kpi_total_sales, kpi_total_gross, kpi_opm,
+    filters_text, selected_cat_text, axis_metric, trend_metric,
+    bar_fig, wf_fig, scatter_fig, line_fig
+):
+    # 1) 차트 PNG 변환
+    bar_png     = fig_to_png_bytes(bar_fig)
+    wf_png      = fig_to_png_bytes(wf_fig)
+    scatter_png = fig_to_png_bytes(scatter_fig)
+    line_png    = fig_to_png_bytes(line_fig)
+
+    # 2) PDF 생성
+    pdf = FPDF(unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+    # ✅ NotoSansKR 폰트 등록 (없으면 기본 폰트로 대체)
+    font_path = "NotoSansKR-Regular.ttf"
+    use_korean_font = False
+    if os.path.exists(font_path):
+        try:
+            pdf.add_font("NotoSansKR", "", font_path, uni=True)
+            use_korean_font = True
+        except Exception:
+            use_korean_font = False
+
+    def set_font(size=11, bold=False):
+        if use_korean_font:
+            pdf.set_font("NotoSansKR", "", size)
+        else:
+            # 한글 폰트가 없으면 기본 폰트(영문)로 대체
+            pdf.set_font("Helvetica", "B" if bold else "", size)
+
+    # 3) 커버/요약
+    pdf.add_page()
+    set_font(16, bold=True)
+    pdf.cell(0, 10, "제품 카테고리별 수익성 대시보드", ln=1)
+
+    set_font(11)
+    pdf.multi_cell(0, 6, filters_text)
+    pdf.ln(2)
+    pdf.cell(0, 6, f"선택 카테고리: {selected_cat_text}", ln=1)
+    pdf.cell(0, 6, f"산점도 Y축: {axis_metric} | 추세 지표: {trend_metric}", ln=1)
+
+    pdf.ln(2)
+    set_font(12, bold=True)
+    pdf.cell(0, 7, "KPI 요약", ln=1)
+    set_font(11)
+    pdf.cell(0, 6, f"총 매출액: {kpi_total_sales:,.0f}", ln=1)
+    pdf.cell(0, 6, f"총 매출총이익: {kpi_total_gross:,.0f}", ln=1)
+    if pd.notna(kpi_opm):
+        pdf.cell(0, 6, f"영업이익률: {kpi_opm:.2f}%", ln=1)
+    else:
+        pdf.cell(0, 6, "영업이익률: -", ln=1)
+
+    # 4) 차트 페이지(각 차트 1페이지)
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
+    img_w = page_w
+    img_h = 160  # mm 단위 대략적 비율
+
+    def add_chart_page(title, png_bytes):
+        pdf.add_page()
+        set_font(12, bold=True)
+        pdf.cell(0, 8, title, ln=1)
+        pdf.image(io.BytesIO(png_bytes), x=pdf.l_margin, y=None, w=img_w, h=img_h)
+
+    add_chart_page("카테고리별 영업이익률 (Bar)", bar_png)
+    add_chart_page("선택 카테고리 수익 구조 (Waterfall)", wf_png)
+    add_chart_page("수익성 vs 고객경험 (Scatter)", scatter_png)
+    add_chart_page("시간 추세 (Line)", line_png)
+
+    # 5) PDF 바이트 반환
+    pdf_bytes = pdf.output(dest="S").encode("latin1")
+    return pdf_bytes
+
+# ===== 버튼 노출 (현재 필터/선택 상태를 캡처) =====
+filters_text = (
+    f"필터 -> 사업부: {biz or '(전체)'} | 지역: {reg or '(전체)'} | "
+    f"채널: {ch or '(전체)'} | 세그먼트: {seg or '(전체)'}"
+)
+selected_cat_text = sel_cat
+kpi_total_sales = fil["매출액"].sum()
+kpi_total_gross = fil["매출총이익"].sum()
+kpi_opm = (fil["영업이익"].sum() / kpi_total_sales * 100) if kpi_total_sales else np.nan
+
+st.download_button(
+    label="📄 PDF로 내보내기",
+    data=build_pdf_bytes(
+        kpi_total_sales, kpi_total_gross, kpi_opm,
+        filters_text, selected_cat_text, axis_metric, trend_metric,
+        bar_fig, wf_fig, scatter_fig, line_fig
+    ),
+    file_name="dashboard_report.pdf",
+    mime="application/pdf",
+    use_container_width=True
+)
+
+# 폰트가 없을 때 안내
+if not os.path.exists("NotoSansKR-Regular.ttf"):
+    st.info("한글이 깨지면 레포에 NotoSansKR-Regular.ttf를 넣어주세요. (app.py와 같은 폴더)")
