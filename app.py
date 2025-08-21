@@ -108,51 +108,115 @@ def build_color_map(all_categories, palette=CATEGORY_COLORS):
     return color_map
 
 # -----------------------
-# 데이터 업로드/로드
+# 데이터 업로드/로드 (Streamlit Cloud 친화형)
 # -----------------------
-st.sidebar.header("데이터 업로드")
-uploaded = st.sidebar.file_uploader("CSV 파일을 업로드하세요", type=["csv"])
+import os
+import io
+import requests
 
-# ⚠️ 본인 경로로 변경하세요(또는 업로드 사용)
-# 예) "/Users/내계정/Desktop/데이터 스토리텔링 대시보드/KPI_Master_Small_12M_KR.csv"
-default_path = "/User/juyubin//Desktop/데이터 스토리텔링 대시보드/KPI_Master_Small_12M_KR.csv"
+st.sidebar.header("데이터 업로드 (필요 시)")
+uploaded = st.sidebar.file_uploader("CSV 파일 업로드", type=["csv"])
+
+# 1) 레포에 포함된 CSV (app.py와 같은 폴더) 를 우선 시도
+LOCAL_CSV_PATH = "KPI_Master_Small_12M_KR.csv"
+
+# 2) (선택) GitHub Raw URL fallback - 본인 레포 경로로 교체
+# 예시: https://raw.githubusercontent.com/<USER>/<REPO>/main/KPI_Master_Small_12M_KR.csv
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/<YOUR_ID>/<YOUR_REPO>/main/KPI_Master_Small_12M_KR.csv"
+
+def _try_read_csv_any_encoding_from_buffer(buf):
+    for enc in ["utf-8", "utf-8-sig", "cp949", "euc-kr"]:
+        try:
+            buf.seek(0)
+            return pd.read_csv(buf, encoding=enc)
+        except Exception:
+            continue
+    raise RuntimeError("CSV 인코딩 자동 판별 실패")
+
+def _load_local_csv_if_exists(path):
+    if os.path.exists(path):
+        # 파일 핸들로 읽을 때는 인코딩 루프를 위해 메모리로 올려두는 게 안전
+        with open(path, "rb") as f:
+            raw = f.read()
+        return _try_read_csv_any_encoding_from_buffer(io.BytesIO(raw))
+    return None
+
+def _load_csv_from_github_raw(url):
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return _try_read_csv_any_encoding_from_buffer(io.BytesIO(resp.content))
+    except Exception:
+        return None
 
 df = None
-load_errors = []
+load_log = []
 
-if uploaded is not None:
+# A) 로컬(레포 포함) CSV 시도
+df = _load_local_csv_if_exists(LOCAL_CSV_PATH)
+if df is not None:
+    load_log.append(f"✅ 로컬 CSV 로드 성공: {LOCAL_CSV_PATH}")
+else:
+    load_log.append(f"❌ 로컬 CSV 없음/로드 실패: {LOCAL_CSV_PATH}")
+
+# B) 로컬 실패 시 GitHub Raw URL 시도 (원하시면 끄셔도 됩니다)
+if df is None and GITHUB_RAW_URL and "<YOUR_ID>" not in GITHUB_RAW_URL:
+    df = _load_csv_from_github_raw(GITHUB_RAW_URL)
+    if df is not None:
+        load_log.append(f"✅ GitHub Raw에서 CSV 로드 성공")
+    else:
+        load_log.append(f"❌ GitHub Raw에서 CSV 로드 실패")
+
+# C) 그래도 실패하면 업로드 위젯 사용
+if df is None and uploaded is not None:
     try:
-        df = load_csv_safe(uploaded)
-        st.sidebar.success("업로드한 CSV를 성공적으로 불러왔습니다.")
+        # 업로드 파일을 메모리에서 인코딩 루프 처리
+        file_bytes = uploaded.read()
+        df = _try_read_csv_any_encoding_from_buffer(io.BytesIO(file_bytes))
+        load_log.append("✅ 업로드 CSV 로드 성공")
     except Exception as e:
-        load_errors.append(f"업로드 파일 읽기 실패: {e}")
+        load_log.append(f"❌ 업로드 CSV 로드 실패: {e}")
 
-# 업로드가 없거나 실패하면 기본 경로 시도
+# 최종 실패 시 에러 안내
 if df is None:
-    try:
-        df = load_csv_safe(default_path)
-        st.sidebar.info("업로드가 없어 기본 경로 CSV를 불러왔습니다.")
-    except Exception as e:
-        load_errors.append(f"기본 경로 읽기 실패: {e}")
-
-# 최종 점검: 여전히 실패하면 즉시 중단
-if df is None:
-    st.error("CSV를 불러오지 못했습니다. 아래 원인을 확인하세요:")
-    for msg in load_errors:
-        st.code(msg)
+    st.error("CSV를 불러오지 못했습니다. 아래 로그를 참고하세요.")
+    for m in load_log:
+        st.write("•", m)
+    st.info("방법 1) 레포에 CSV를 app.py와 같은 폴더에 넣고 커밋/배포 다시하기")
+    st.info("방법 2) GitHub Raw URL을 GITHUB_RAW_URL 변수에 올바르게 설정")
+    st.info("방법 3) 사이드바에서 CSV 업로드")
     st.stop()
 
-# 파일이 로드되었으면 컬럼 미리보기 제공(디버깅에 유용)
-with st.expander("데이터 로딩 확인 (디버그)"):
+# 이후 파싱/전처리(월 컬럼/숫자형/파생지표) — 기존 함수 재사용
+def coerce_numeric(df, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+# '월' 파싱
+if "월" in df.columns:
+    try:
+        df["월"] = pd.to_datetime(df["월"])
+    except Exception:
+        df["월"] = pd.to_datetime(df["월"].astype(str) + "-01", errors="coerce")
+
+num_cols = ["매출액","매출원가","매출총이익","마케팅비용","운영비용","영업이익","NPS","CSAT"]
+df = coerce_numeric(df, num_cols)
+
+with np.errstate(divide='ignore', invalid='ignore'):
+    if {"매출액","영업이익"}.issubset(df.columns):
+        df["영업이익률(%)"] = (df["영업이익"] / df["매출액"] * 100).replace([np.inf, -np.inf], np.nan)
+    if {"매출액","매출총이익"}.issubset(df.columns):
+        df["매출총이익률(%)"] = (df["매출총이익"] / df["매출액"] * 100).replace([np.inf, -np.inf], np.nan)
+
+# 디버그 보기
+with st.expander("데이터 로딩 로그/미리보기"):
+    for m in load_log:
+        st.write("•", m)
     st.write("shape:", df.shape)
     st.write("columns:", list(df.columns))
     st.dataframe(df.head(10), use_container_width=True)
-
-# 필수 컬럼 확인
-missing = check_required_columns(df)
-if missing:
-    st.error(f"필수 컬럼이 없습니다: {missing}")
-    st.stop()
 
 # -----------------------
 # 필터
