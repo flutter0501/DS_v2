@@ -405,7 +405,22 @@ import streamlit as st
 
 # Plotly Figure -> PNG 바이트 (kaleido 필요)
 def fig_to_png_bytes(fig, scale=2.0, width=1400, height=800):
-    return pio.to_image(fig, format="png", scale=scale, width=width, height=height, engine="kaleido")
+    try:
+        return pio.to_image(
+            fig,
+            format="png",
+            scale=scale,
+            width=width,
+            height=height,
+            engine="kaleido",
+        )
+    except Exception as e:
+        st.error(
+            "이미지 렌더링(kaleido)에 실패했습니다. "
+            "requirements.txt와 runtime.txt 설정을 확인한 뒤 다시 배포하세요."
+        )
+        st.code(str(e))
+        raise
 
 def build_pdf_bytes(
     kpi_total_sales, kpi_total_gross, kpi_opm,
